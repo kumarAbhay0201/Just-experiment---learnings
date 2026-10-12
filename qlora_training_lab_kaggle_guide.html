@@ -1,0 +1,465 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Build a Reusable QLoRA Training Lab — Kaggle Notebook Guide</title>
+<style>
+:root { color-scheme: light; --ink:#202733; --muted:#5b6472; --line:#dce1e8; --panel:#f5f7fa; --blue:#2457a7; }
+* { box-sizing:border-box; }
+body { margin:0; font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial,sans-serif; color:var(--ink); background:#fff; line-height:1.6; }
+header { padding:34px 20px; background:#f0f5ff; border-bottom:1px solid var(--line); }
+header, main { max-width:1000px; margin:auto; }
+main { padding:20px; }
+h1 { line-height:1.2; margin:0 0 10px; font-size:2rem; }
+h2 { margin-top:36px; padding-top:14px; border-top:1px solid var(--line); font-size:1.5rem; }
+h3 { margin-top:24px; font-size:1.15rem; }
+p, li { max-width:85ch; }
+.note { padding:12px 16px; background:var(--panel); border-left:4px solid var(--blue); border-radius:6px; margin:16px 0; }
+.cell { border:1px solid var(--line); border-radius:10px; margin:14px 0 24px; overflow:hidden; }
+.cellhead { display:flex; justify-content:space-between; gap:12px; align-items:center; background:#f6f7f9; padding:10px 14px; border-bottom:1px solid var(--line); font-weight:650; }
+.cellhead small { color:var(--muted); font-weight:400; }
+pre { margin:0; padding:16px; overflow-x:auto; background:#fbfcfe; white-space:pre; tab-size:4; }
+code { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; font-size:.92rem; }
+.copy { border:1px solid #c7d0dd; background:white; border-radius:6px; padding:6px 10px; cursor:pointer; font-size:.85rem; }
+.copy:hover { background:#eaf1ff; }
+.toc { background:#fafbfd; border:1px solid var(--line); border-radius:10px; padding:18px 22px; }
+a { color:var(--blue); }
+footer { max-width:1000px; margin:auto; padding:20px; color:var(--muted); border-top:1px solid var(--line); }
+@media print { .copy { display:none; } body { font-size:11pt; } .cell { break-inside:avoid; } }
+</style>
+</head>
+<body>
+<header>
+<h1>Build a Reusable QLoRA Training Lab</h1>
+<p>Kaggle Notebook guide — explanations in reading order, with code cells ready to copy and paste one at a time.</p>
+<div class="note"><strong>Notebook workflow:</strong> For each code block, add a new Kaggle code cell, copy the block, and run it only after the preceding cells have completed. The code is displayed separately from the explanations.</div>
+</header>
+<main>
+<div class="toc"><strong>Workflow contents</strong><ol>
+<li><a href="#section-1">Step 1 — Configure Kaggle and Hugging Face</a></li><li><a href="#section-8">Step 2 — Profile the GPU</a></li><li><a href="#section-10">Step 3 — Load the untuned model and capture a baseline</a></li><li><a href="#section-15">Step 4 — Expose the dataset-schema problem</a></li><li><a href="#section-19">Step 5 — Load and normalize training data</a></li><li><a href="#section-25">Step 6 — Prepare the QLoRA model and training data</a></li><li><a href="#section-31">Step 7 — Compare the tuned model with the baseline</a></li><li><a href="#section-35">Step 8 — Publish the adapter to Hugging Face Hub (optional)</a></li><li><a href="#section-38">Step 9 — Verify artifacts and preserve your work</a></li><li><a href="#section-40">Troubleshooting checklist</a></li></ol></div>
+<h1>Build a Reusable QLoRA Training Lab on Kaggle</h1><p><strong>Notebook-first edition:</strong> explanations are Markdown cells; every executable step is a code cell. No manual creation of <code>requirements.txt</code>, <code>baseline.py</code>, <code>schema_probe.py</code>, or <code>qlora_lab.py</code> is required.</p><p><strong>Goal:</strong> profile the GPU, capture untuned baseline responses, normalize different dataset schemas, train a 4-bit NF4 QLoRA adapter, compare outputs, and optionally publish the adapter to Hugging Face Hub.</p><blockquote><p>Run cells from top to bottom. Kaggle GPU availability and package compatibility can change. If installation changes core libraries, restart the session and rerun the notebook from the beginning.</p></blockquote><h2 id="section-1">Step 1 — Configure Kaggle and Hugging Face</h2><p>In Kaggle Notebook settings, enable <strong>Internet</strong> and select a <strong>GPU accelerator</strong>. Choose a T4 GPU option if available. Changing the accelerator may restart the session.</p><p>We&#x27;ll install packages directly from a code cell rather than creating a <code>requirements.txt</code> file. The versions below are intentionally not hard-pinned, to reduce the chance that a nonexistent or incompatible version prevents setup.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 1</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>%pip install -q -U transformers peft accelerate bitsandbytes datasets huggingface_hub trl</code></pre>
+</div>
+<h3>Verify the installed packages</h3><p>If the installation completed but imports fail, restart the notebook session, then rerun the notebook from the top.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 2</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>import importlib.metadata as metadata
+
+packages = [&quot;transformers&quot;, &quot;peft&quot;, &quot;accelerate&quot;, &quot;bitsandbytes&quot;, &quot;datasets&quot;, &quot;huggingface_hub&quot;, &quot;trl&quot;]
+for package in packages:
+    try:
+        print(f&quot;{package}: {metadata.version(package)}&quot;)
+    except metadata.PackageNotFoundError:
+        print(f&quot;{package}: NOT INSTALLED&quot;)</code></pre>
+</div>
+<h3>Authenticate with Hugging Face (optional until publishing)</h3><p>Create a <strong>write</strong> access token in your Hugging Face settings. Never paste the token into notebook source code or publish a notebook containing it. The login prompt below keeps the token out of the code cell.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 3</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>from huggingface_hub import notebook_login
+notebook_login()</code></pre>
+</div>
+<p>If you are not ready to publish, you can skip authentication for now and continue training. You will need to authenticate before the publishing step.</p><h2 id="section-8">Step 2 — Profile the GPU</h2><p>Check that CUDA is available and record the visible GPU model, VRAM, compute capability, and a suitable mixed-precision dtype before loading the model.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 4</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>import torch
+
+if not torch.cuda.is_available():
+    raise RuntimeError(&quot;No CUDA GPU is available. Enable a GPU accelerator in Kaggle settings.&quot;)
+
+print(&quot;PyTorch:&quot;, torch.__version__)
+print(&quot;Visible GPUs:&quot;, torch.cuda.device_count())
+for index in range(torch.cuda.device_count()):
+    props = torch.cuda.get_device_properties(index)
+    print(
+        f&quot;GPU {index}: {torch.cuda.get_device_name(index)} | &quot;
+        f&quot;VRAM: {props.total_memory / (1024**3):.2f} GiB | &quot;
+        f&quot;CUDA capability: {props.major}.{props.minor}&quot;
+    )
+
+bf16_supported = torch.cuda.is_bf16_supported()
+compute_dtype = torch.bfloat16 if bf16_supported else torch.float16
+print(&quot;BF16 supported:&quot;, bf16_supported)
+print(&quot;Selected compute dtype:&quot;, compute_dtype)</code></pre>
+</div>
+<h2 id="section-10">Step 3 — Load the untuned model and capture a baseline</h2><p>A <strong>baseline</strong> means responses generated by the base model *before* fine-tuning. Load the tokenizer and 4-bit quantized model first, then run fixed prompts and save the results to <code>baseline.json</code>. This JSON is a data artifact, not a Python script.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 5</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>from pathlib import Path
+import json
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+
+MODEL_ID = &quot;Qwen/Qwen3-1.7B&quot;
+OUTPUT_DIR = Path(&quot;/kaggle/working/qwen3-1.7b-capybara-qlora&quot;)
+BASELINE_PATH = Path(&quot;/kaggle/working/baseline.json&quot;)
+
+PROMPTS = [
+    &quot;Write a three-bullet checklist for reviewing a pull request.&quot;,
+    &quot;Explain gradient accumulation in one short paragraph.&quot;,
+]
+
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    bnb_4bit_quant_type=&quot;nf4&quot;,
+    bnb_4bit_use_double_quant=True,
+    bnb_4bit_compute_dtype=compute_dtype,
+)
+
+tokenizer = AutoTokenizer.from_pretrained(MODEL_ID)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL_ID,
+    quantization_config=quantization_config,
+    torch_dtype=compute_dtype,
+    device_map={&quot;&quot;: 0},
+)
+print(f&quot;Loaded {MODEL_ID}&quot;)
+print(f&quot;Model memory footprint: {model.get_memory_footprint() / (1024**3):.2f} GiB&quot;)</code></pre>
+</div>
+<h3>Generate the two untuned responses</h3><p>We use the same prompts and generation settings later for the fine-tuned adapter. Sampling can still produce variation, so treat this as a practical comparison rather than a perfectly deterministic benchmark.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 6</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>model.eval()
+baseline_responses = []
+
+for prompt in PROMPTS:
+    messages = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}]
+    formatted = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    inputs = tokenizer(formatted, return_tensors=&quot;pt&quot;).to(&quot;cuda:0&quot;)
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=96,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    new_tokens = generated[0][inputs[&quot;input_ids&quot;].shape[1]:]
+    response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    baseline_responses.append({&quot;prompt&quot;: prompt, &quot;response&quot;: response})
+    print(f&quot;\nPrompt: {prompt}\nBaseline: {response}\n&quot;)
+
+baseline = {
+    &quot;model_id&quot;: MODEL_ID,
+    &quot;compute_dtype&quot;: str(compute_dtype),
+    &quot;responses&quot;: baseline_responses,
+}
+BASELINE_PATH.write_text(json.dumps(baseline, indent=2), encoding=&quot;utf-8&quot;)
+print(&quot;Saved baseline to:&quot;, BASELINE_PATH)</code></pre>
+</div>
+
+<div class="cell">
+<div class="cellhead"><span>Code cell 7</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>print(BASELINE_PATH.read_text(encoding=&quot;utf-8&quot;))</code></pre>
+</div>
+<h2 id="section-15">Step 4 — Expose the dataset-schema problem</h2><p>Training datasets do not all store conversations the same way. The following fixtures show three common layouts. First, deliberately try a rigid validator that accepts only the <code>messages</code> field.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 8</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>FIXTURES = {
+    &quot;conversational&quot;: {
+        &quot;messages&quot;: [
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;Name one benefit of unit tests.&quot;},
+            {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: &quot;They catch regressions early.&quot;},
+        ]
+    },
+    &quot;prompt_completion&quot;: {
+        &quot;prompt&quot;: &quot;Name one benefit of unit tests.&quot;,
+        &quot;completion&quot;: &quot;They catch regressions early.&quot;,
+    },
+    &quot;instruction_input_output&quot;: {
+        &quot;instruction&quot;: &quot;Summarize the input.&quot;,
+        &quot;input&quot;: &quot;Unit tests help catch regressions before release.&quot;,
+        &quot;output&quot;: &quot;Unit tests catch pre-release regressions.&quot;,
+    },
+}
+
+for name, fixture in FIXTURES.items():
+    print(f&quot;{name}: {sorted(fixture.keys())}&quot;)</code></pre>
+</div>
+
+<div class="cell">
+<div class="cellhead"><span>Code cell 9</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>def require_messages(example):
+    if &quot;messages&quot; not in example:
+        raise ValueError(f&quot;Expected a messages field; received keys {sorted(example.keys())}&quot;)
+    return example[&quot;messages&quot;]
+
+for name, fixture in FIXTURES.items():
+    try:
+        print(f&quot;{name}: accepted ({len(require_messages(fixture))} messages)&quot;)
+    except ValueError as error:
+        print(f&quot;{name}: rejected: {error}&quot;)</code></pre>
+</div>
+<p>The validator accepts only the conversational fixture. The reusable pipeline should normalize supported source formats into a single canonical contract: a non-empty list of dictionaries containing <code>role</code> and <code>content</code>.</p><h2 id="section-19">Step 5 — Load and normalize training data</h2><p>This notebook uses <code>trl-lib/Capybara</code> as the source dataset, matching the article&#x27;s intended exercise. Dataset schemas can change, so inspect a sample before training. The normalizer below handles the three demonstrated layouts and raises a clear error for unsupported rows rather than silently discarding them.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 10</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>from datasets import load_dataset
+
+DATASET_ID = &quot;trl-lib/Capybara&quot;
+raw_dataset = load_dataset(DATASET_ID)
+print(raw_dataset)
+print(&quot;Available splits:&quot;, list(raw_dataset.keys()))
+print(&quot;First training example:&quot;)
+print(raw_dataset[&quot;train&quot;][0])</code></pre>
+</div>
+<h3>Define the canonical message normalizer</h3><p>For records with a <code>messages</code> list, preserve the role/content structure. For prompt-completion or instruction-input-output records, build a user message and an assistant response. If the real dataset uses a different schema, inspect the printed example and adjust the function explicitly.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 11</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>def normalize_record(example):
+    if isinstance(example.get(&quot;messages&quot;), list):
+        messages = example[&quot;messages&quot;]
+    elif &quot;prompt&quot; in example and &quot;completion&quot; in example:
+        messages = [
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: str(example[&quot;prompt&quot;])},
+            {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: str(example[&quot;completion&quot;])},
+        ]
+    elif &quot;instruction&quot; in example and &quot;output&quot; in example:
+        user_text = str(example[&quot;instruction&quot;])
+        extra_input = example.get(&quot;input&quot;)
+        if extra_input not in (None, &quot;&quot;):
+            user_text += &quot;\n\nInput:\n&quot; + str(extra_input)
+        messages = [
+            {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user_text},
+            {&quot;role&quot;: &quot;assistant&quot;, &quot;content&quot;: str(example[&quot;output&quot;])},
+        ]
+    else:
+        raise ValueError(f&quot;Unsupported dataset schema. Keys: {sorted(example.keys())}&quot;)
+
+    normalized = []
+    for item in messages:
+        if not isinstance(item, dict) or &quot;role&quot; not in item or &quot;content&quot; not in item:
+            raise ValueError(&quot;Each message must be a dict with &#x27;role&#x27; and &#x27;content&#x27;.&quot;)
+        normalized.append({&quot;role&quot;: str(item[&quot;role&quot;]), &quot;content&quot;: str(item[&quot;content&quot;])})
+
+    if not normalized:
+        raise ValueError(&quot;Message list cannot be empty.&quot;)
+    return {&quot;messages&quot;: normalized}
+
+# Validate the three fixture layouts.
+for name, fixture in FIXTURES.items():
+    print(name, &quot;-&gt;&quot;, normalize_record(fixture))</code></pre>
+</div>
+<h3>Apply normalization to the dataset</h3><p>This cell reports failures with a sample of the original row. If it fails, do not guess at the schema: inspect the sample from the previous cell and update <code>normalize_record</code> to match the actual dataset.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 12</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>train_split = raw_dataset[&quot;train&quot;]
+print(&quot;Training rows:&quot;, len(train_split))
+print(&quot;Raw columns:&quot;, train_split.column_names)
+
+normalized_rows = []
+errors = []
+for index, row in enumerate(train_split):
+    try:
+        normalized_rows.append(normalize_record(row))
+    except Exception as exc:
+        errors.append((index, str(exc), row))
+        if len(errors) &gt;= 3:
+            break
+
+if errors:
+    print(&quot;Normalization errors (up to 3):&quot;)
+    for index, message, row in errors:
+        print({&quot;index&quot;: index, &quot;error&quot;: message, &quot;sample&quot;: row})
+    raise ValueError(&quot;Dataset schema needs an explicit mapping before training.&quot;)
+
+print(&quot;Normalized rows:&quot;, len(normalized_rows))
+print(&quot;Example normalized row:&quot;, normalized_rows[0])</code></pre>
+</div>
+<h2 id="section-25">Step 6 — Prepare the QLoRA model and training data</h2><p>We will keep the quantized base weights frozen and train a LoRA adapter. The example is intentionally short for a Kaggle lab, not a production-quality training recipe. The number of rows and steps can be increased after the first run succeeds.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 13</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>from datasets import Dataset
+from peft import LoraConfig, prepare_model_for_kbit_training
+from transformers import TrainingArguments
+from trl import SFTTrainer
+
+# Start with a small subset to validate the complete pipeline before a longer run.
+MAX_TRAIN_ROWS = min(500, len(normalized_rows))
+MAX_STEPS = 30
+
+train_rows = normalized_rows[:MAX_TRAIN_ROWS]
+if len(train_rows) &lt; 2:
+    raise ValueError(&quot;Not enough normalized rows to train. Check the dataset and schema mapping.&quot;)
+
+# Render each conversation into the model&#x27;s expected text format.
+def render_messages(example):
+    text_value = tokenizer.apply_chat_template(
+        example[&quot;messages&quot;],
+        tokenize=False,
+        add_generation_prompt=False,
+    )
+    return {&quot;text&quot;: text_value}
+
+train_dataset = Dataset.from_list(train_rows).map(render_messages)
+print(train_dataset)
+print(train_dataset[0][&quot;text&quot;][:1000])</code></pre>
+</div>
+<h3>Attach the LoRA adapter and configure training</h3><p>If a Transformers/TRL API error appears here, capture the complete traceback and installed versions. Training APIs can change between releases; don&#x27;t change multiple package versions blindly.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 14</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>model.config.use_cache = False
+model = prepare_model_for_kbit_training(model)
+
+lora_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias=&quot;none&quot;,
+    task_type=&quot;CAUSAL_LM&quot;,
+    target_modules=&quot;all-linear&quot;,
+)
+
+training_args = TrainingArguments(
+    output_dir=str(OUTPUT_DIR),
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+    max_steps=MAX_STEPS,
+    learning_rate=2e-4,
+    logging_steps=5,
+    save_steps=MAX_STEPS,
+    save_total_limit=1,
+    bf16=bf16_supported,
+    fp16=not bf16_supported,
+    gradient_checkpointing=True,
+    optim=&quot;paged_adamw_8bit&quot;,
+    report_to=&quot;none&quot;,
+    evaluation_strategy=&quot;no&quot;,
+)
+
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=train_dataset,
+    peft_config=lora_config,
+)
+print(&quot;Trainable parameter summary:&quot;)
+trainer.model.print_trainable_parameters()</code></pre>
+</div>
+<h3>Train the adapter</h3><p>This cell may take several minutes. Keep the Kaggle session active until training completes. A short run proves the pipeline works; it does not guarantee that responses improve.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 15</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>train_result = trainer.train()
+trainer.save_model(str(OUTPUT_DIR))
+tokenizer.save_pretrained(str(OUTPUT_DIR))
+
+metrics = dict(train_result.metrics)
+metrics[&quot;train_rows_used&quot;] = len(train_dataset)
+metrics[&quot;max_steps_configured&quot;] = MAX_STEPS
+if torch.cuda.is_available():
+    metrics[&quot;peak_memory_gib&quot;] = torch.cuda.max_memory_allocated() / (1024**3)
+
+metrics_path = OUTPUT_DIR / &quot;training_metrics.json&quot;
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+metrics_path.write_text(json.dumps(metrics, indent=2, default=str), encoding=&quot;utf-8&quot;)
+print(json.dumps(metrics, indent=2, default=str))
+print(&quot;Saved adapter and metrics to:&quot;, OUTPUT_DIR)</code></pre>
+</div>
+<h2 id="section-31">Step 7 — Compare the tuned model with the baseline</h2><p>Generate responses from the adapter using the same prompts. We use deterministic decoding for a more stable side-by-side comparison. The fine-tuned responses may be better, similar, or worse; evaluate the actual outputs rather than assuming improvement.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 16</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>model.config.use_cache = True
+model.eval()
+fine_tuned_responses = []
+
+for prompt in PROMPTS:
+    messages = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: prompt}]
+    formatted = tokenizer.apply_chat_template(
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+        enable_thinking=False,
+    )
+    inputs = tokenizer(formatted, return_tensors=&quot;pt&quot;).to(&quot;cuda:0&quot;)
+    with torch.no_grad():
+        generated = model.generate(
+            **inputs,
+            max_new_tokens=96,
+            do_sample=False,
+            pad_token_id=tokenizer.pad_token_id,
+        )
+    new_tokens = generated[0][inputs[&quot;input_ids&quot;].shape[1]:]
+    response = tokenizer.decode(new_tokens, skip_special_tokens=True).strip()
+    fine_tuned_responses.append({&quot;prompt&quot;: prompt, &quot;response&quot;: response})
+    print(f&quot;\nPrompt: {prompt}\nFine-tuned: {response}\n&quot;)</code></pre>
+</div>
+<h3>Save comparison evidence</h3><p>This writes <code>comparison.json</code> into the adapter output directory. The file contains the base model ID, dataset ID, compute dtype, metrics, baseline responses, and fine-tuned responses.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 17</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>comparison = {
+    &quot;model_id&quot;: MODEL_ID,
+    &quot;dataset_id&quot;: DATASET_ID,
+    &quot;compute_dtype&quot;: str(compute_dtype),
+    &quot;peak_memory_gib&quot;: metrics.get(&quot;peak_memory_gib&quot;),
+    &quot;eval_metrics&quot;: metrics,
+    &quot;baseline&quot;: baseline,
+    &quot;fine_tuned&quot;: {&quot;responses&quot;: fine_tuned_responses},
+}
+comparison_path = OUTPUT_DIR / &quot;comparison.json&quot;
+comparison_path.write_text(json.dumps(comparison, indent=2), encoding=&quot;utf-8&quot;)
+print(&quot;Saved comparison to:&quot;, comparison_path)
+print(comparison_path.read_text(encoding=&quot;utf-8&quot;))</code></pre>
+</div>
+<h2 id="section-35">Step 8 — Publish the adapter to Hugging Face Hub (optional)</h2><p>Before publishing, confirm you are authenticated and replace the repository name with your own Hugging Face username. Do not put access tokens into source code.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 18</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>from huggingface_hub import HfApi, whoami
+
+HF_USERNAME = whoami()[&quot;name&quot;]
+REPO_ID = f&quot;{HF_USERNAME}/qwen3-1.7b-capybara-qlora&quot;
+print(&quot;Target repository:&quot;, REPO_ID)</code></pre>
+</div>
+
+<div class="cell">
+<div class="cellhead"><span>Code cell 19</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code># Upload the saved adapter folder and evidence files to your Hugging Face Hub repository.
+api = HfApi()
+api.create_repo(repo_id=REPO_ID, repo_type=&quot;model&quot;, exist_ok=True)
+api.upload_folder(
+    repo_id=REPO_ID,
+    repo_type=&quot;model&quot;,
+    folder_path=str(OUTPUT_DIR),
+    commit_message=&quot;Upload QLoRA adapter and training evidence&quot;,
+)
+print(f&quot;Published: https://huggingface.co/{REPO_ID}&quot;)</code></pre>
+</div>
+<h2 id="section-38">Step 9 — Verify artifacts and preserve your work</h2><p>The working directory is temporary runtime storage. Save a Kaggle notebook version to preserve your notebook and outputs. The Hugging Face repository is the durable copy of the uploaded adapter and evidence.</p>
+<div class="cell">
+<div class="cellhead"><span>Code cell 20</span><button class="copy" onclick="copyCell(this)">Copy code</button></div>
+<pre><code>print(&quot;Baseline exists:&quot;, BASELINE_PATH.exists())
+print(&quot;Adapter output directory exists:&quot;, OUTPUT_DIR.exists())
+if OUTPUT_DIR.exists():
+    for path in sorted(OUTPUT_DIR.iterdir()):
+        print(path.name, &quot;directory&quot; if path.is_dir() else f&quot;{path.stat().st_size:,} bytes&quot;)</code></pre>
+</div>
+<h2 id="section-40">Troubleshooting checklist</h2><ul><li>**No GPU:** enable a GPU accelerator in Kaggle settings and rerun the hardware profile.</li><li>**Package import/API errors:** inspect installed versions; restart after package installation and rerun cells from the top.</li><li>**Out of memory:** use a smaller model, reduce sequence length or batch size, and close other GPU sessions.</li><li>**Dataset schema error:** inspect the actual sample and explicitly update `normalize_record`; don&#x27;t silently drop rows.</li><li>**Hub authentication/publishing error:** rerun `notebook_login()` with a write token and check the repository ID.</li><li>**Session restarted:** rerun cells in order. Files under `/kaggle/working` may not survive a new session.</li><li>**Short run doesn&#x27;t improve answers:** expected; increase data/steps carefully and compare held-out evaluation, not only two example prompts.</li></ul><h2 id="section-40">Secret mission — Reuse the pipeline with SmolLM3-3B</h2><p>The article&#x27;s stretch goal is to reuse the same normalization and training concepts with <code>HuggingFaceTB/SmolLM3-3B</code>. Change <code>MODEL_ID</code> and the output/repository names, then rerun from the model-loading cell onward. First confirm that the model&#x27;s chat template works and that the selected Kaggle GPU has enough memory. A 3B model may require reducing batch/sequence settings or using a more capable accelerator.</p><p><strong>Important:</strong> this notebook is a practical starting point. Verify the current model card, dataset schema, and installed TRL/Transformers API if any cell fails. Do not publish tokens or private training data.</p>
+</main>
+<footer>
+<p>Compatibility note: package APIs and dataset schemas can change. If a cell fails, use the full traceback to diagnose it before changing package versions. Never paste a Hugging Face token into code or publish it.</p>
+</footer>
+<script>
+async function copyCell(button) {
+  const code = button.closest('.cell').querySelector('pre code').innerText;
+  try {
+    await navigator.clipboard.writeText(code);
+    const old = button.textContent;
+    button.textContent = 'Copied!';
+    setTimeout(() => button.textContent = old, 1200);
+  } catch (e) {
+    const range = document.createRange();
+    range.selectNodeContents(button.closest('.cell').querySelector('pre code'));
+    const sel = window.getSelection();
+    sel.removeAllRanges(); sel.addRange(range);
+    button.textContent = 'Select and copy';
+  }
+}
+</script>
+</body>
+</html>
